@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "WireGuard VPN 客户端"
+    },
+    {
+      "name": "permission_camera_reason",
+      "value": "用于扫描 WireGuard 配置二维码"
+    },
+    {
+      "name": "permission_media_reason",
+      "value": "用于从相册选择二维码图片解码配置"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "modelVersion": "6.1.1",
+  "name": "harmonyos-wg-client",
+  "version": "1.0.0",
+  "description": "WireGuard VPN Client for HarmonyOS",
+  "dependencies": {}
+}

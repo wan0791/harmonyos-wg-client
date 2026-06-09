@@ -1,0 +1,10 @@
+{
+  "app": {
+    "bundleName": "com.lianhui.wireguard",
+    "vendor": "万慧文",
+    "versionCode": 1000001,
+    "versionName": "1.0.0",
+    "icon": "$media:app_icon",
+    "label": "$string:app_name"
+  }
+}

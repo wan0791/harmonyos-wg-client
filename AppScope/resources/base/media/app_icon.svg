@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">
+  <rect width="192" height="192" rx="32" fill="#2b6cb0"/>
+  <g fill="none" stroke="#ffffff" stroke-width="6" stroke-linecap="round">
+    <!-- 盾牌 -->
+    <path d="M96 32 L148 52 L148 96 Q148 140 96 160 Q44 140 44 96 L44 52 Z" stroke-width="8"/>
+    <!-- 锁 -->
+    <circle cx="96" cy="100" r="14" stroke-width="5"/>
+    <path d="M96 106 L96 116" stroke-width="5"/>
+    <path d="M88 96 L88 88 Q88 78 96 78 Q104 78 104 88 L104 96" stroke-width="4"/>
+  </g>
+  <text x="96" y="176" font-family="sans-serif" font-size="22" fill="#90cdf4" text-anchor="middle" font-weight="600">WG</text>
+</svg>

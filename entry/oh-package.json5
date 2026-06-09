@@ -1,0 +1,7 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "WireGuard VPN entry module",
+  "main": "",
+  "dependencies": {}
+}

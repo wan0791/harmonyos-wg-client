@@ -1,0 +1,26 @@
+# HarmonyOS build
+build/
+.hvigor/
+.idea/
+.gradle/
+local.properties
+*.iml
+
+# OHOS signing (contains private keys)
+build-profile.json5
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+*.swp
+*.swo
+
+# Temp
+*.log
+/tmp/
