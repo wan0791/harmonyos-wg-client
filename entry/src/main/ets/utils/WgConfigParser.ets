@@ -24,6 +24,8 @@ export interface WgParsedConfig {
   publicKey?: string;
   /** AllowedIPs */
   allowedIPs?: string;
+  /** PresharedKey */
+  presharedKey?: string;
   /** 原始解析错误 */
   error?: string;
 }
@@ -114,6 +116,9 @@ export function parseWgConfig(content: string): WgParsedConfig {
         }
         case 'publickey':
           result.publicKey = value;
+          break;
+        case 'presharedkey':
+          result.presharedKey = value;
           break;
         case 'allowedips':
           result.allowedIPs = value;

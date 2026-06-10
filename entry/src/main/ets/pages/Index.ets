@@ -4,7 +4,7 @@
  */
 
 import { Want, common } from '@kit.AbilityKit';
-import { vpnExtension } from '@kit.NetworkKit';
+import { connection, vpnExtension } from '@kit.NetworkKit';
 import { picker } from '@kit.CoreFileKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
@@ -13,9 +13,27 @@ import { router } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { parseWgConfig } from '../utils/WgConfigParser';
 import { decodeQrCode, PixelData } from '../utils/QrDecoder';
+import { getRelay } from '../utils/UdpRelay';
 
 const DOMAIN = 0x0000;
 const TAG = 'WgImport';
+
+/** VpnExtAbility 固定端口（中继将 WG 响应发回此端口） */
+const VPN_EXT_PORT: number = 52788;
+/** 中继端口基值（自动尝试 +0 ~ +9） */
+const RELAY_PORT_BASE: number = 52789;
+const PORT_RANGE: number = 10;
+
+/** 简单判断字符串是否为 IP 地址（非域名） */
+function isIP(s: string): boolean {
+  const parts: string[] = s.split('.');
+  if (parts.length !== 4) return false;
+  for (let i: number = 0; i < parts.length; i++) {
+    const n: number = parseInt(parts[i]);
+    if (isNaN(n) || n < 0 || n > 255) return false;
+  }
+  return true;
+}
 
 @Entry
 @Component
@@ -26,6 +44,7 @@ struct Index {
   @State dnsServer: string = '114.114.114.114';
   @State clientPrivateKey: string = '';
   @State serverPublicKey: string = '';
+  @State presharedKey: string = '';
   @State isConnected: boolean = false;
   @State statusText: string = '就绪';
   @State statusLog: string = '';
@@ -95,6 +114,15 @@ struct Index {
           Column() {
             Text('服务端公钥 (PublicKey)').fontSize(12).fontColor('#a0aec0').width('100%').margin({ bottom: 4 })
             TextInput({ placeholder: 'Base64 编码', text: $$this.serverPublicKey })
+              .width('100%').height(40).fontSize(14).fontColor('#e2e8f0')
+              .placeholderColor('#4a5568').backgroundColor('#161b22').borderRadius(8)
+          }.width('100%').margin({ bottom: 12 })
+          Column() {
+            Row() {
+              Text('预共享密钥 (PresharedKey)').fontSize(12).fontColor('#a0aec0').margin({ bottom: 4 }).layoutWeight(1)
+              Text('⚠️ 如握手失败可尝试删除').fontSize(10).fontColor('#e53e3e').margin({ bottom: 4 })
+            }.width('100%')
+            TextInput({ placeholder: '可选，留空不使用 PSK', text: $$this.presharedKey })
               .width('100%').height(40).fontSize(14).fontColor('#e2e8f0')
               .placeholderColor('#4a5568').backgroundColor('#161b22').borderRadius(8)
           }.width('100%').margin({ bottom: 12 })
@@ -258,21 +286,45 @@ struct Index {
     }
 
     this.statusText = '正在连接...';
-    this.appendLog('正在启动 VPN 扩展...');
     this.appendLog('服务端: ' + this.serverHost + ':' + this.serverPort);
 
     try {
-      // 准备启动参数
-      const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      // 0. DNS 解析：将域名解析为 IP 地址（避免 DNS 问题导致包发不到服务器）
+      let serverIP: string = this.serverHost;
+      if (this.serverHost.indexOf('.') >= 0 && !isIP(this.serverHost)) {
+        try {
+          this.appendLog('正在解析域名 ' + this.serverHost + '...');
+          const addrs: connection.NetAddress[] = await connection.getAddressesByName(this.serverHost);
+          if (addrs && addrs.length > 0) {
+            serverIP = addrs[0].address;
+            this.appendLog('域名解析结果: ' + this.serverHost + ' → ' + serverIP);
+          }
+        } catch (dnsErr) {
+          this.appendLog('DNS 解析失败，使用原始域名: ' + JSON.stringify(dnsErr));
+        }
+      }
+
+      // 1. 启动 UDP 中继（运行在 EntryAbility 进程，绕过 TUN 劫持）
+      this.appendLog('正在启动 UDP 中继...');
+      this.appendLog('中继目标: ' + serverIP + ':' + port + ' (域名: ' + this.serverHost + ')');
+      const relay = getRelay();
+      await relay.start(serverIP, port, RELAY_PORT_BASE, VPN_EXT_PORT);
+      const relayPort: number = relay.getPort();
+      this.appendLog('UDP 中继已启动 relay=' + relayPort + ' vpnExt=' + VPN_EXT_PORT);
+
+      // 2. 准备 VpnExtension 启动参数
       const want: Want = {
         deviceId: '',
         bundleName: 'com.lianhui.wireguard',
         abilityName: 'WireGuardVpnExt',
         parameters: {
           'serverHost': this.serverHost,
+          'serverIP': serverIP,
           'serverPort': port,
           'clientAddress': this.clientAddress,
           'dnsServer': this.dnsServer,
+          'relayPort': relayPort,
+          'vpnExtPort': VPN_EXT_PORT,
         }
       };
 
@@ -283,14 +335,19 @@ struct Index {
       if (this.serverPublicKey) {
         want.parameters!['serverPublicKey'] = this.serverPublicKey;
       }
+      if (this.presharedKey) {
+        want.parameters!['presharedKey'] = this.presharedKey;
+      }
 
       await vpnExtension.startVpnExtensionAbility(want);
       this.isConnected = true;
       this.statusText = '已连接';
       this.appendLog('VPN 扩展启动成功');
     } catch (e) {
+      // 中继或 VPN 启动失败 → 停止中继
       this.statusText = '连接失败';
       this.appendLog('启动失败：' + JSON.stringify(e));
+      try { getRelay().stop(); } catch (_) { /* ignore */ }
     }
   }
 
@@ -352,6 +409,7 @@ struct Index {
       this.dnsServer = config.dnsServer;
       this.clientPrivateKey = config.privateKey || '';
       this.serverPublicKey = config.publicKey || '';
+      this.presharedKey = config.presharedKey || '';
 
       this.appendLog('✅ 配置已加载：' + (config.serverHost || '(空)') + ':' + (config.serverPort || '51820'));
       if (config.privateKey) {
@@ -359,6 +417,9 @@ struct Index {
       }
       if (config.publicKey) {
         this.appendLog('🔑 服务端公钥已导入（' + config.publicKey.substring(0, 16) + '...）');
+      }
+      if (config.presharedKey) {
+        this.appendLog('🔑 PresharedKey 已导入');
       }
     } catch (e) {
       const errMsg: string = JSON.stringify(e);
@@ -516,6 +577,10 @@ struct Index {
       this.isConnected = false;
       this.statusText = '已断开';
       this.appendLog('VPN 已停止');
+
+      // 停止 UDP 中继
+      try { getRelay().stop(); } catch (_) { /* ignore */ }
+      this.appendLog('UDP 中继已停止');
     } catch (e) {
       this.appendLog('停止失败：' + JSON.stringify(e));
     }

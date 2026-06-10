@@ -24,3 +24,5 @@ Thumbs.db
 # Temp
 *.log
 /tmp/
+nul
+entry/.cxx/

@@ -12,32 +12,35 @@ const BASE64_CHARS: string = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
  * @returns 解码后的字节数组
  */
 export function base64Decode(input: string): Uint8Array {
-  // 去除空白字符
-  let s: string = input.replace(/\s/g, '');
+  // 去除空白字符和填充
+  let s: string = input.replace(/\s/g, '').replace(/=+$/, '');
 
-  // 处理填充
-  const padLen: number = s.endsWith('==') ? 2 : (s.endsWith('=') ? 1 : 0);
-  if (padLen > 0) {
-    s = s.substring(0, s.length - padLen);
-  }
-
-  // 解码
   const result: number[] = [];
-  let buffer: number = 0;
-  let bitsCollected: number = 0;
+  let i: number = 0;
 
-  for (let i = 0; i < s.length; i++) {
-    const c: string = s[i];
-    const idx: number = BASE64_CHARS.indexOf(c);
-    if (idx === -1) continue; // 跳过非法字符
+  // 每 4 个 base64 字符解码为 3 字节
+  while (i < s.length) {
+    // 读取 4 个有效字符的索引
+    const idx: number[] = [];
+    let j: number = i;
+    while (idx.length < 4 && j < s.length) {
+      const ci: number = BASE64_CHARS.indexOf(s[j]);
+      if (ci !== -1) {
+        idx.push(ci);
+      }
+      j++;
+    }
+    i = j;
 
-    buffer = (buffer << 6) | idx;
-    bitsCollected += 6;
-
-    if (bitsCollected >= 8) {
-      bitsCollected -= 8;
-      result.push((buffer >> bitsCollected) & 0xFF);
-      buffer &= (1 << bitsCollected) - 1;
+    // 解码小组：4 个 6 位 → 3 个 8 位
+    if (idx.length >= 2) {
+      result.push(((idx[0] << 2) | (idx[1] >> 4)) & 0xFF);
+    }
+    if (idx.length >= 3) {
+      result.push(((idx[1] << 4) | (idx[2] >> 2)) & 0xFF);
+    }
+    if (idx.length >= 4) {
+      result.push(((idx[2] << 6) | idx[3]) & 0xFF);
     }
   }
 
