@@ -2,9 +2,14 @@
 
 基于 HarmonyOS NEXT (API 23) 的 WireGuard VPN 客户端。
 
-## 状态：✅ 握手成功（2026-06-10）
+## 状态：✅ 握手成功（2026-06-11）
 
-Python 标准库已成功与 WG 内核完成 Noise_IKpsk2 握手（收到 Response type=2）。ArkTS App 待手机实测。
+手机实测成功完成 Noise_IKpsk2 握手，数据传输正常。
+```
+Handshake: ekk0NFM... = 1781096215 ✅
+Transfer:  接收 7136 字节 / 发送 736 字节 ✅
+```
+⏳ TUN ↔ WG 数据转发（Transport 层）待实现，网页暂不能访问。
 
 ## 功能
 
