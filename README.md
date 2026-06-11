@@ -1,68 +1,73 @@
 # HarmonyOS WireGuard VPN Client
 
-基于 HarmonyOS NEXT (API 23) 的 WireGuard VPN 客户端。
+鸿蒙 WireGuard VPN 客户端，基于 HarmonyOS NEXT API 23。
 
-## 状态：✅ 握手成功（2026-06-11）
+**测试设备**: Mate 70 Pro (6.1.0.170)
 
-手机实测成功完成 Noise_IKpsk2 握手，数据传输正常。
+## 状态
+
 ```
-Handshake: ekk0NFM... = 1781096215 ✅
-Transfer:  接收 7136 字节 / 发送 736 字节 ✅
+WG 握手: ✅ Noise IKpsk2 完整通过
+Transport 加解密: ✅ ChaCha20Poly1305 双向流通
+NAPI 原生 Socket: ✅ 主进程直连 WG 服务器
+互联网路由: ❌ VpnConfig.routes API 23 不生效（阻塞）
 ```
-⏳ TUN ↔ WG 数据转发（Transport 层）待实现，网页暂不能访问。
+
+> 当前 VPN 子网（10.8.0.0/24）可通过隧道通信。外网流量路由需等华为确认 `VpnConfig.routes` 实现状态。
+> 详见 [docs/harmonyos-wg-ffi-report.md](docs/harmonyos-wg-ffi-report.md)
+
+## 架构
+
+```
+┌─ VPN 进程 (:vpn) ───────────────────────────┐
+│  TUN ← encrypt/decrypt → 127.0.0.1 relay     │
+│  SNAT (源 IP 重写) + IPv6 过滤               │
+└────────── loopback UDP ──────────────────────┘
+                     │
+┌─ 主进程 ─────────────────────────────────────┐
+│  UdpRelay → NAPI C socket(pthread) → WG 服务器 │
+└──────────────────────────────────────────────┘
+```
+
+- **NAPI C 模块** (`udp_socket.cpp`): 原生 UDP socket + pthread 收包 + TSFN 回调
+- **主进程运行**: `protectProcessNet()` 在 API 23 不生效，主进程绕开 TUN
+- **无 socat/TCPSocket**: loopback UDP 中继，纯 NAPI 直连
 
 ## 功能
 
-- ✅ **配置文件导入** — 支持 `.conf` 格式
-- ✅ **二维码扫描** — 相册选图解码
-- ✅ **端口分离 + 域名** — 独立输入框
-- ✅ **密钥编辑** — 含 PresharedKey
-- ✅ **TUN 虚拟网卡** — 创建 VPN 接口
-- ✅ **TCP 隧道中继** — 绕过 TUN 劫持（HarmonyOS API 23 限制）
-- ✅ **密码学全通过** — BLAKE2s、X25519、ChaCha20Poly1305
-- ✅ **Noise_IKpsk2 握手完成** — Python→内核验证通过
+| 功能 | 状态 |
+|------|------|
+| `.conf` 配置导入 | ✅ |
+| 二维码扫描（相机/相册） | ✅ |
+| Noise IKpsk2 握手 | ✅ |
+| Transport 加解密 | ✅ |
+| Keepalive + Rekey | ✅ |
+| SNAT（源 IP 重写 + checksum 修正） | ✅ |
+| IPv6 过滤 | ✅ |
+| 诊断面板（实时 Tx/Rx） | ✅ |
+| 互联网浏览 | ❌ 等待 API 支持 |
 
-## 核心修复：CookieChecker MAC1
+## 密码学（纯 ArkTS）
 
-WG 内核的 MAC1 使用 `BLAKE2s("mac1----" || SERVER_PUB)[:16]`，而非 Noise 协议的链式 MAC1。
-详见 wireguard-go `device/cookie.go:44-55`。
-
-KDF 使用 **HMAC-BLAKE2s**（非 BLAKE2s keyed mode），见 `noise-helpers.go:43-56`。
-
-## 网络架构
-
-```
-手机 ArkTS → UDP loopback → UdpRelay(TCP 8443) → socat → WG UDP 51820
-                        ↑ TCP 绕过 TUN，8443 避开运营商封锁
-```
+| 算法 | 用途 |
+|------|------|
+| BLAKE2s-256 / BLAKE2s-128 | 哈希、HMAC、MAC1 |
+| X25519 | DH 密钥交换 |
+| ChaCha20-Poly1305 | AEAD 加解密 |
+| HMAC-BLAKE2s | KDF (wireguard-go 一致) |
 
 ## 构建
 
 ```bash
-hvigorw --mode module -p module=entry@default assembleHap
+# 需要 HarmonyOS SDK API 23 + DevEco Studio
+hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug
 ```
-- DevEco Studio / HarmonyOS SDK API 23
-
-## 使用
-
-1. 从 wg-easy 获取 `.conf` 配置
-2. App 中点击 **📁 导入配置**
-3. 点 **连接 VPN**
-
-## 密码学实现（纯 ArkTS）
-
-| 算法 | 用途 | 验证 |
-|------|------|------|
-| BLAKE2s-256 | 哈希、HMAC | ✅ RFC 7693 |
-| X25519 | 密钥交换 | ✅ RFC 7748 |
-| ChaCha20-Poly1305 | AEAD | ✅ RFC 8439 |
-| HMAC-BLAKE2s | KDF (HKDF) | ✅ wireguard-go 一致 |
 
 ## 已知限制
 
-- `protectProcessNet()` 在 API 23 上不生效 → 使用 TCP 隧道
-- 数据包转发（TUN ↔ UDP）待完善
-- 仅单 Peer 模式
+- `VpnConfig.routes` 在 API 23 不生效（尝试过所有组合）
+- `protectProcessNet()` 不工作 → NAPI socket 在主进程
+- `requireNapi` 在 `:vpn` 进程报 error 2147483647
 
 ## 许可
 
