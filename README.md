@@ -2,7 +2,7 @@
 
 鸿蒙 WireGuard VPN 客户端，基于 HarmonyOS NEXT API 23。
 
-**测试设备**: Mate 70 Pro (6.1.0.170) | **当前版本**: [v0.1.0](https://github.com/wan0791/harmonyos-wg-client/releases/tag/v0.1.0)
+**测试设备**: Mate 70 Pro (6.1.0.170) | **当前版本**: [v0.1.1](https://github.com/wan0791/harmonyos-wg-client/releases/tag/v0.1.1)
 
 ## 状态
 
@@ -70,6 +70,20 @@ hvigorw assembleHap --mode module -p module=entry@default -p product=default -p 
 - `requireNapi` 在 `:vpn` 进程报 error 2147483647
 
 ## 更新日志
+
+### [v0.1.1] — 2026-06-11
+
+代码评审安全修复。
+
+- 🔴 删除私钥 hex 日志输出，`dh_log` 加 `DEBUG_HANDSHAKE` 开关（默认关闭）
+- 🔴 C 代码空指针保护 + 内存泄漏修复
+- 🟠 X25519 密钥生成改用 `cryptoFramework.createRandom()`（CSPRNG）
+- 🟠 Transport 反重放保护（counter window 2000）
+- 🟠 Handshake receiver index 校验
+- 🟠 C 代码线程安全 + argc 校验
+- 🟡 `Uint8Array.set()` 替代逐字节拷贝，去掉不必要 `ArrayBuffer.slice()`
+- 🟡 工具函数去重（`readU32`/`writeU32`/`writeBytes`/`stringToBytes`）
+- 🟡 删除未使用代码
 
 ### [v0.1.0] — 2026-06-11
 
