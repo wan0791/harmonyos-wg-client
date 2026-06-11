@@ -631,8 +631,8 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
           }
         }
       } catch (e) {
-        // TUN read may throw when no data — just retry
-        await this.sleepMs(50);
+        // EAGAIN(-11): 无数据，降低轮询频率减少日志噪音
+        await this.sleepMs(200);
       }
     }
   }

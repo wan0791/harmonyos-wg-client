@@ -151,6 +151,22 @@ W C01320/...:vpn/JsEnv: [source_map.cpp145] the stack without line info
 ### 结论
 `VpnConfig.routes` 在 HarmonyOS 6.1 API 23 上**完全不生效**——无论 `trustedApplications`、`interface`、路由格式如何设置，系统路由表 (`/proc/net/route`) 均无变化。此问题需华为官方确认 `routes` 字段在 API 23 上的实现状态。
 
+## 六、华为开发者 AI 第二次回复 & 验证结果
+
+### 路由问题
+- AI 确认：`VpnConfig.routes` 不生效是平台实现层面的问题
+- 建议：抓 NETMGR/AAFWK 日志 → **验证结果**：无任何相关日志，OS 完全沉默
+- 建议：查 `netManager.addRoute` → **验证结果**：API 23 无此接口
+- 建议：提交官方 Bug 报告
+
+### TUN 读取
+- 确认 NAPI 在 `:vpn` 不可用（error 2147483647）
+- 建议：降低轮询频率 + 静默处理 → **已实施**（50ms → 200ms）
+- FFI (`@kit.FFIKit`) 理论可用，但增加复杂度
+
+### 结论
+AI 确认我们的实现方向正确（SNAT、IPv6 过滤均为必须）。路由阻塞属于平台 API 实现问题，需官方解决。
+
 ## 七、服务器端已确认正常
 
 - IP 转发: `net.ipv4.ip_forward = 1`
