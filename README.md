@@ -2,7 +2,7 @@
 
 鸿蒙 WireGuard VPN 客户端，基于 HarmonyOS NEXT API 23。
 
-**测试设备**: Mate 70 Pro (6.1.0.170)
+**测试设备**: Mate 70 Pro (6.1.0.170) | **当前版本**: [v0.1.0](https://github.com/wan0791/harmonyos-wg-client/releases/tag/v0.1.0)
 
 ## 状态
 
@@ -68,6 +68,23 @@ hvigorw assembleHap --mode module -p module=entry@default -p product=default -p 
 - `VpnConfig.routes` 在 API 23 不生效（尝试过所有组合）
 - `protectProcessNet()` 不工作 → NAPI socket 在主进程
 - `requireNapi` 在 `:vpn` 进程报 error 2147483647
+
+## 更新日志
+
+### [v0.1.0] — 2026-06-11
+
+首个可用版本。
+
+- Noise IKpsk2 握手 (HMAC-BLAKE2s KDF, BLAKE2s-128 MAC1)
+- ChaCha20Poly1305 Transport 加解密
+- NAPI 原生 UDP socket (pthread + TSFN 收包)
+- Loopback 中继 (无 socat/TCPSocket)
+- SNAT 源 IP 重写 + TCP/UDP checksum 修正
+- IPv6 过滤 + Keepalive
+- @kit.ScanKit 系统相机扫码 + 相册选图
+- .conf 配置文件导入
+- 配置持久化 (preferences)
+- 诊断面板
 
 ## 许可
 
