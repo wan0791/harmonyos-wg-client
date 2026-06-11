@@ -9,7 +9,8 @@ import { picker, fileIo } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { router } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { parseWgConfig } from '../utils/WgConfigParser';
+import { preferences } from '@kit.ArkData';
+import { parseWgConfig, WgParsedConfig } from '../utils/WgConfigParser';
 import { getRelay } from '../utils/UdpRelay';
 import { NativeSocket } from '../utils/NativeSocketFFI';
 
@@ -53,9 +54,21 @@ struct Index {
 
   private nativeSock: NativeSocket | null = null;
   private diagTimer: number = -1;
+  private prefs: preferences.Preferences | null = null;
 
-  aboutToAppear(): void {
-    // 检查是否有扫码返回的结果
+  async aboutToAppear(): Promise<void> {
+    // 加载持久化配置
+    await this.loadConfig();
+
+    // 检查是否有扫码返回的结果（onPageShow 每次可见都检查）
+    this.checkScanResult();
+  }
+
+  onPageShow(): void {
+    this.checkScanResult();
+  }
+
+  private checkScanResult(): void {
     const scanResult: string | undefined = AppStorage.Get<string>('scanResult');
     if (scanResult) {
       this.applyScanResult(scanResult);
@@ -464,6 +477,7 @@ struct Index {
       if (config.presharedKey) {
         this.appendLog('🔑 PresharedKey 已导入');
       }
+      this.saveConfig();
     } catch (e) {
       const errMsg: string = JSON.stringify(e);
       this.appendLog('导入失败：' + errMsg);
@@ -483,34 +497,29 @@ struct Index {
   private applyScanResult(text: string): void {
     // QR 码内容可能是纯文本配置或 wireguard:// 链接
     if (text.startsWith('wireguard://')) {
-      // 解码 wireguard:// 协议
       const encoded: string = text.substring('wireguard://'.length);
       try {
         const decoded: string = decodeURIComponent(encoded);
-        const config = parseWgConfig(decoded);
-        if (config.serverHost) this.serverHost = config.serverHost;
-        if (config.serverPort) this.serverPort = config.serverPort;
-        if (config.clientAddress) this.clientAddress = config.clientAddress;
-        if (config.dnsServer) this.dnsServer = config.dnsServer;
-        this.appendLog('扫码配置已加载：' + config.serverHost + ':' + config.serverPort);
+        this.applyParsedConfig(parseWgConfig(decoded));
+        return;
       } catch {
-        this.appendLog('wireguard:// 解码失败，尝试作为文本配置解析');
-        const config = parseWgConfig(text);
-        if (config.serverHost) this.serverHost = config.serverHost;
-        if (config.serverPort) this.serverPort = config.serverPort;
-        if (config.clientAddress) this.clientAddress = config.clientAddress;
-        if (config.dnsServer) this.dnsServer = config.dnsServer;
-        this.appendLog('扫码配置已加载：' + config.serverHost + ':' + config.serverPort);
+        this.applyParsedConfig(parseWgConfig(text));
+        return;
       }
-    } else {
-      // 直接作为文本配置解析
-      const config = parseWgConfig(text);
-      if (config.serverHost) this.serverHost = config.serverHost;
-      if (config.serverPort) this.serverPort = config.serverPort;
-      if (config.clientAddress) this.clientAddress = config.clientAddress;
-      if (config.dnsServer) this.dnsServer = config.dnsServer;
-      this.appendLog('扫码配置已加载：' + config.serverHost + ':' + config.serverPort);
     }
+    this.applyParsedConfig(parseWgConfig(text));
+  }
+
+  private applyParsedConfig(config: WgParsedConfig): void {
+    if (config.serverHost) this.serverHost = config.serverHost;
+    if (config.serverPort) this.serverPort = config.serverPort;
+    if (config.clientAddress) this.clientAddress = config.clientAddress;
+    if (config.dnsServer) this.dnsServer = config.dnsServer;
+    if (config.privateKey) this.clientPrivateKey = config.privateKey;
+    if (config.publicKey) this.serverPublicKey = config.publicKey;
+    if (config.presharedKey) this.presharedKey = config.presharedKey;
+    this.appendLog('配置已加载：' + config.serverHost + ':' + config.serverPort);
+    this.saveConfig();
   }
 
   // ── 断开 VPN ──
@@ -579,6 +588,51 @@ struct Index {
       }
     } catch (e) {
       this.appendLog('❌ 测试失败: ' + JSON.stringify(e));
+    }
+  }
+
+  // ── 配置持久化 ──
+
+  private async getPrefs(): Promise<preferences.Preferences> {
+    if (!this.prefs) {
+      const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      this.prefs = await preferences.getPreferences(context, 'wg_config');
+    }
+    return this.prefs;
+  }
+
+  private async saveConfig(): Promise<void> {
+    try {
+      const prefs: preferences.Preferences = await this.getPrefs();
+      await prefs.put('serverHost', this.serverHost);
+      await prefs.put('serverPort', this.serverPort);
+      await prefs.put('clientAddress', this.clientAddress);
+      await prefs.put('dnsServer', this.dnsServer);
+      await prefs.put('clientPrivateKey', this.clientPrivateKey);
+      await prefs.put('serverPublicKey', this.serverPublicKey);
+      await prefs.put('presharedKey', this.presharedKey);
+      await prefs.flush();
+      this.appendLog('💾 配置已保存');
+    } catch (e) {
+      // ignore save error
+    }
+  }
+
+  private async loadConfig(): Promise<void> {
+    try {
+      const prefs: preferences.Preferences = await this.getPrefs();
+      const host: string = await prefs.get('serverHost', '') as string;
+      if (!host) return;
+      this.serverHost = host;
+      this.serverPort = await prefs.get('serverPort', '51820') as string;
+      this.clientAddress = await prefs.get('clientAddress', '10.0.0.2') as string;
+      this.dnsServer = await prefs.get('dnsServer', '114.114.114.114') as string;
+      this.clientPrivateKey = await prefs.get('clientPrivateKey', '') as string;
+      this.serverPublicKey = await prefs.get('serverPublicKey', '') as string;
+      this.presharedKey = await prefs.get('presharedKey', '') as string;
+      this.appendLog('📂 已加载保存的配置: ' + host + ':' + this.serverPort);
+    } catch (e) {
+      // ignore load error
     }
   }
 }
