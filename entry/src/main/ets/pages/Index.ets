@@ -5,14 +5,11 @@
 
 import { Want, common } from '@kit.AbilityKit';
 import { connection, vpnExtension } from '@kit.NetworkKit';
-import { picker } from '@kit.CoreFileKit';
-import { fileIo } from '@kit.CoreFileKit';
-import { image } from '@kit.ImageKit';
+import { picker, fileIo } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { router } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { parseWgConfig } from '../utils/WgConfigParser';
-import { decodeQrCode, PixelData } from '../utils/QrDecoder';
 import { getRelay } from '../utils/UdpRelay';
 import { NativeSocket } from '../utils/NativeSocketFFI';
 
@@ -476,101 +473,10 @@ struct Index {
 
   // ── 扫码 ──
   private handleScanClick(): void {
-    // 弹出选择：相机扫码 / 相册选图
-    AlertDialog.show({
-      title: '选择扫码方式',
-      message: '请选择获取二维码的方式',
-      autoCancel: true,
-      alignment: DialogAlignment.Bottom,
-      primaryButton: {
-        value: '📷 相机扫码',
-        action: () => { this.scanWithCamera(); }
-      },
-      secondaryButton: {
-        value: '🖼 从相册选择',
-        action: () => { this.scanFromAlbum(); }
-      },
-      cancel: () => {}
-    });
-  }
-
-  private scanWithCamera(): void {
     try {
-      this.appendLog('正在打开相机扫码...');
-      router.pushUrl({
-        url: 'pages/ScanPage',
-        params: { 'source': 'main' }
-      });
+      router.pushUrl({ url: 'pages/ScanPage' });
     } catch (e) {
-      this.appendLog('相机页面跳转失败：' + JSON.stringify(e) + '，使用相册扫码');
-      this.scanFromAlbum();
-    }
-  }
-
-  /**
-   * 处理从 ScanPage 返回的扫码结果
-   * @param scanResult 扫码解码后的文本
-   */
-  public onScanResult(scanResult: string): void {
-    if (scanResult) {
-      this.applyScanResult(scanResult);
-      this.appendLog('✅ 相机扫码成功');
-    }
-  }
-
-  private async scanFromAlbum(): Promise<void> {
-    try {
-      const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
-      // 用 DocumentViewPicker 选图片文件（API 24 兼容）
-      const docPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
-      const docOptions: picker.DocumentSelectOptions = {
-        fileSuffixFilters: ['.jpg', '.jpeg', '.png', '.bmp'],
-        maxSelectNumber: 1,
-      };
-
-      const uris: string[] = await docPicker.select(docOptions);
-      if (!uris || uris.length === 0) {
-        this.appendLog('已取消选择图片');
-        return;
-      }
-
-      const uri: string = uris[0];
-      this.appendLog('正在解码二维码...');
-
-      // 读取图片像素数据
-      const imageSource: image.ImageSource = image.createImageSource(uri);
-      const pixelMap: image.PixelMap = await imageSource.createPixelMap({
-        desiredPixelFormat: image.PixelMapFormat.RGBA_8888,
-        desiredSize: { width: 800, height: 800 },
-      });
-
-      // 用 PositionArea 结构读取像素
-      const pxWidth: number = 800; // desiredSize 设定的宽
-      const pxHeight: number = 800; // desiredSize 设定的高
-      const bufferSize: number = pxWidth * pxHeight * 4;
-      const dst: ArrayBuffer = new ArrayBuffer(bufferSize);
-
-      await pixelMap.readPixelsToBuffer(dst);
-      const pixelArr: Uint8Array = new Uint8Array(dst);
-
-      const pixelDataStruct: PixelData = {
-        width: pxWidth,
-        height: pxHeight,
-        data: pixelArr,
-      };
-
-      const qrResult = decodeQrCode(pixelDataStruct);
-      pixelMap.release();
-      imageSource.release();
-
-      if (qrResult.success) {
-        this.appendLog('✅ 二维码解码成功');
-        this.applyScanResult(qrResult.text);
-      } else {
-        this.appendLog('❌ 解码失败：' + (qrResult.error || '图片中未找到 QR 码'));
-      }
-    } catch (e) {
-      this.appendLog('相册扫码失败：' + JSON.stringify(e));
+      this.appendLog('扫码页面跳转失败：' + JSON.stringify(e));
     }
   }
 

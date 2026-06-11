@@ -1,122 +1,120 @@
 /**
  * QR 码扫描页面
- * 支持：从图库选择图片解码二维码
- *
- * 使用方式：
- *   router.pushUrl({ url: 'pages/ScanPage' })
- *   扫码结果通过 AppStorage 传回 Index 页面
+ * - 系统原生相机扫码（ScanKit startScanForResult）
+ * - 相册选图扫码
  */
 
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
-import { fileIo } from '@kit.CoreFileKit';
 import { picker } from '@kit.CoreFileKit';
 import { router } from '@kit.ArkUI';
+import { scanBarcode, scanCore } from '@kit.ScanKit';
 import { decodeQrCode, PixelData } from '../utils/QrDecoder';
-
-interface ScanResult {
-  text: string;
-  success: boolean;
-}
+import { BusinessError } from '@kit.BasicServicesKit';
 
 @Entry
 @Component
 struct ScanPage {
-  @State scanResult: string = '';
   @State statusMsg: string = '选择扫码方式';
+  @State scanResult: string = '';
   @State decoded: boolean = false;
+
+  private scanOptions: scanBarcode.ScanOptions = {
+    scanTypes: [scanCore.ScanType.ALL],
+    enableMultiMode: false,
+    enableAlbum: false,
+  };
 
   build() {
     Column() {
-      // ── 顶部导航栏 ──
       Row() {
         Button('< 返回')
-          .fontSize(16)
-          .fontColor('#e2e8f0')
-          .backgroundColor('transparent')
-          .onClick(() => { this.goBack(); })
+          .fontSize(16).fontColor('#e2e8f0').backgroundColor('transparent')
+          .onClick(() => { router.back(); })
         Text('二维码扫描').fontSize(18).fontWeight(700).fontColor('#ffffff')
           .layoutWeight(1).textAlign(TextAlign.Center)
         Blank().width(60)
       }
-      .width('100%')
-      .padding({ top: 12, bottom: 8, left: 8, right: 8 })
+      .width('100%').padding({ top: 12, bottom: 8, left: 8, right: 8 })
 
-      // ── 扫码预览区域 ──
+      // 预览区
       Column() {
         Column()
-          .width(240)
-          .height(240)
-          .border({ width: { top: 3, bottom: 3, left: 3, right: 3 }, color: '#48bb78' })
-          .borderRadius(12)
-          .backgroundColor('#1a202c')
+          .width(260).height(260)
+          .border({ width: 3, color: this.decoded ? '#48bb78' : '#3b7bbf' })
+          .borderRadius(16).backgroundColor('#1a202c')
           .justifyContent(FlexAlign.Center)
-          .alignItems(HorizontalAlign.Center)
-
         Text(this.statusMsg)
-          .fontSize(15)
-          .fontColor('#e2e8f0')
-          .margin({ top: 16 })
+          .fontSize(13).fontColor('#e2e8f0').margin({ top: 16 })
           .textAlign(TextAlign.Center)
-          .width('100%')
       }
-      .width('100%')
-      .height(320)
-      .justifyContent(FlexAlign.Center)
-      .alignItems(HorizontalAlign.Center)
+      .width('100%').height(330)
+      .justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center)
       .backgroundColor('#0d1117')
 
-      // ── 解码结果 ──
+      // 解码结果
       if (this.scanResult) {
         Column() {
           Text('✅ 解码成功').fontSize(14).fontColor('#48bb78').margin({ bottom: 8 })
           Text(this.scanResult)
-            .fontSize(11)
-            .fontColor('#a0aec0')
-            .width('100%')
-            .maxLines(8)
+            .fontSize(11).fontColor('#a0aec0').width('100%').maxLines(8)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .backgroundColor('#161b22')
-            .borderRadius(8)
-            .padding(10)
+            .backgroundColor('#161b22').borderRadius(8).padding(10)
         }
-        .width('100%')
-        .margin({ top: 8 })
-        .padding({ left: 16, right: 16 })
+        .width('100%').margin({ top: 8 }).padding({ left: 16, right: 16 })
       }
 
-      // ── 操作按钮 ──
+      // 按钮
       Column() {
-        Button('🖼 从相册选择二维码图片')
-          .width('100%')
-          .height(48)
-          .fontSize(16)
-          .fontColor('#ffffff')
-          .backgroundColor('#3b7bbf')
-          .borderRadius(10)
+        Button('📷 相机扫码')
+          .width('100%').height(48).fontSize(16)
+          .fontColor('#ffffff').backgroundColor('#3b7bbf').borderRadius(10)
+          .margin({ top: 8 })
+          .onClick(() => { this.startScan(); })
+
+        Button('🖼 从相册选择')
+          .width('100%').height(48).fontSize(16)
+          .fontColor('#ffffff').backgroundColor('#2d3748').borderRadius(10)
           .margin({ top: 8 })
           .onClick(() => { this.pickFromAlbum(); })
 
         if (this.scanResult) {
           Button('✅ 使用此配置')
-            .width('100%')
-            .height(48)
-            .fontSize(16)
-            .fontColor('#ffffff')
-            .backgroundColor('#48bb78')
-            .borderRadius(10)
+            .width('100%').height(48).fontSize(16)
+            .fontColor('#ffffff').backgroundColor('#48bb78').borderRadius(10)
             .margin({ top: 8 })
-            .onClick(() => { this.useResult(); })
+            .onClick(() => {
+              AppStorage.setOrCreate<string>('scanResult', this.scanResult);
+              router.back();
+            })
         }
       }
-      .width('100%')
-      .padding({ left: 16, right: 16, bottom: 16 })
-      .layoutWeight(1)
-      .backgroundColor('#0d1117')
+      .width('100%').padding({ left: 16, right: 16, bottom: 16 })
+      .layoutWeight(1).backgroundColor('#0d1117')
     }
-    .width('100%')
-    .height('100%')
-    .backgroundColor('#0d1117')
+    .width('100%').height('100%').backgroundColor('#0d1117')
+  }
+
+  // ── 系统原生相机扫码 ──
+
+  private async startScan(): Promise<void> {
+    try {
+      this.statusMsg = '正在打开扫码...';
+      const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      const result: scanBarcode.ScanResult =
+        await scanBarcode.startScanForResult(context, this.scanOptions);
+
+      this.scanResult = result.originalValue;
+      this.statusMsg = '✅ 扫码成功！';
+      this.decoded = true;
+    } catch (err) {
+      const bizErr: BusinessError = err as BusinessError;
+      if (bizErr.code === 1000500002) {
+        this.statusMsg = '扫码已取消';
+      } else {
+        this.statusMsg = '扫码失败，请用相册选图';
+      }
+    }
   }
 
   // ── 相册选图扫码 ──
@@ -125,42 +123,43 @@ struct ScanPage {
     try {
       const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
       const docPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
-      const docOptions: picker.DocumentSelectOptions = {
+      const uris: string[] = await docPicker.select({
         fileSuffixFilters: ['.jpg', '.jpeg', '.png', '.bmp'],
         maxSelectNumber: 1,
-      };
+      });
 
-      const uris: string[] = await docPicker.select(docOptions);
       if (!uris || uris.length === 0) {
         this.statusMsg = '已取消选择';
         return;
       }
 
-      this.statusMsg = '正在解码 QR 码...';
+      this.statusMsg = '正在解码...';
+      await this.decodeImage(uris[0]);
+    } catch (err) {
+      this.statusMsg = '选图失败';
+    }
+  }
 
-      const uri: string = uris[0];
+  private async decodeImage(uri: string): Promise<void> {
+    try {
       const imageSource: image.ImageSource = image.createImageSource(uri);
       const pixelMap: image.PixelMap = await imageSource.createPixelMap({
         desiredPixelFormat: image.PixelMapFormat.RGBA_8888,
         desiredSize: { width: 800, height: 800 },
       });
 
-      // 读取像素数据（使用创建时指定的尺寸）
-      const pxWidth: number = 800;
-      const pxHeight: number = 800;
-      const bufferSize: number = pxWidth * pxHeight * 4;
+      const info: image.ImageInfo = await pixelMap.getImageInfo();
+      const bufferSize: number = info.size.width * info.size.height * 4;
       const dst: ArrayBuffer = new ArrayBuffer(bufferSize);
-
       await pixelMap.readPixelsToBuffer(dst);
-      const pixelArr: Uint8Array = new Uint8Array(dst);
 
-      const pixelDataStruct: PixelData = {
-        width: pxWidth,
-        height: pxHeight,
-        data: pixelArr,
+      const pixelData: PixelData = {
+        width: info.size.width,
+        height: info.size.height,
+        data: new Uint8Array(dst),
       };
 
-      const qrResult = decodeQrCode(pixelDataStruct);
+      const qrResult = decodeQrCode(pixelData);
       pixelMap.release();
       imageSource.release();
 
@@ -169,22 +168,10 @@ struct ScanPage {
         this.statusMsg = '✅ QR 码解码成功！';
         this.decoded = true;
       } else {
-        this.statusMsg = '❌ 解码失败：' + (qrResult.error || '图片中未找到有效 QR 码');
+        this.statusMsg = '❌ ' + (qrResult.error || '未找到有效 QR 码');
       }
     } catch (err) {
-      this.statusMsg = '解码失败：' + JSON.stringify(err);
+      this.statusMsg = '解码失败';
     }
-  }
-
-  // ── 导航 ──
-
-  private goBack(): void {
-    router.back();
-  }
-
-  private useResult(): void {
-    // 将结果存入 AppStorage，Index 的 aboutToAppear 会读取
-    AppStorage.setOrCreate<string>('scanResult', this.scanResult);
-    router.back();
   }
 }
