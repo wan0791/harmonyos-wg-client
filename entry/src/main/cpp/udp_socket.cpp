@@ -56,7 +56,12 @@ static void TSFNCallback(napi_env env, napi_value jsCallback, void* context, voi
     // 创建 ArrayBuffer 并拷贝数据
     napi_value arrayBuffer;
     void* abPtr = nullptr;
-    napi_create_arraybuffer(env, rd->len, &abPtr, &arrayBuffer);
+    napi_status status = napi_create_arraybuffer(env, rd->len, &abPtr, &arrayBuffer);
+    if (status != napi_ok || abPtr == nullptr) {
+        delete[] rd->buf;
+        delete rd;
+        return;
+    }
     memcpy(abPtr, rd->buf, rd->len);
 
     // 创建 from 对象 { address: string, port: number }
@@ -104,7 +109,11 @@ static void* RecvThreadFunc(void* arg) {
         inet_ntop(AF_INET, &from.sin_addr, rd->fromIP, sizeof(rd->fromIP));
         rd->fromPort = ntohs(from.sin_port);
 
-        napi_call_threadsafe_function(ctx->tsfn, rd, napi_tsfn_nonblocking);
+        napi_status status = napi_call_threadsafe_function(ctx->tsfn, rd, napi_tsfn_nonblocking);
+        if (status != napi_ok) {
+            delete[] rd->buf;
+            delete rd;
+        }
     }
 
     return nullptr;
@@ -114,6 +123,10 @@ static napi_value StartRecvThread(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value args[2];
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 2) {
+        napi_throw_error(env, nullptr, "expected 2 args (fd, callback)");
+        return nullptr;
+    }
 
     int fd;
     napi_get_value_int32(env, args[0], &fd);
@@ -137,9 +150,17 @@ static napi_value StartRecvThread(napi_env env, napi_callback_info info) {
     napi_value tsfnName;
     napi_create_string_utf8(env, "recvCallback", NAPI_AUTO_LENGTH, &tsfnName);
 
-    napi_create_threadsafe_function(env, callback, nullptr, tsfnName,
-                                     0, 1, nullptr, nullptr, nullptr,
-                                     TSFNCallback, &g_ctx.tsfn);
+    napi_status tsfnStatus = napi_create_threadsafe_function(
+        env, callback, nullptr, tsfnName,
+        0, 1, nullptr, nullptr, nullptr,
+        TSFNCallback, &g_ctx.tsfn);
+
+    if (tsfnStatus != napi_ok) {
+        g_ctx.running.store(false);
+        pthread_mutex_unlock(&g_ctxMutex);
+        napi_throw_error(env, nullptr, "napi_create_threadsafe_function failed");
+        return nullptr;
+    }
 
     pthread_create(&g_ctx.thread, nullptr, RecvThreadFunc, &g_ctx);
 
@@ -187,6 +208,10 @@ static napi_value UdpSendTo(napi_env env, napi_callback_info info) {
     size_t argc = 4;
     napi_value args[4];
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 4) {
+        napi_throw_error(env, nullptr, "expected 4 args (fd, data, host, port)");
+        return nullptr;
+    }
 
     int fd;
     napi_get_value_int32(env, args[0], &fd);
@@ -225,6 +250,10 @@ static napi_value UdpRecvFrom(napi_env env, napi_callback_info info) {
     size_t argc = 3;
     napi_value args[3];
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 3) {
+        napi_throw_error(env, nullptr, "expected 3 args (fd, bufSize, timeoutMs)");
+        return nullptr;
+    }
 
     int fd;
     napi_get_value_int32(env, args[0], &fd);
@@ -288,9 +317,17 @@ static napi_value CloseUdpSocket(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1];
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "expected 1 argument (fd)");
+        return nullptr;
+    }
     int fd;
     napi_get_value_int32(env, args[0], &fd);
+
+    pthread_mutex_lock(&g_ctxMutex);
     close(fd);
+    pthread_mutex_unlock(&g_ctxMutex);
+
     napi_value result;
     napi_get_undefined(env, &result);
     return result;

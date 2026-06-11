@@ -18,7 +18,7 @@ import { socket } from '@kit.NetworkKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { NoiseHandshake, HandshakeState } from '../wireguard/tunnel/Handshake';
+import { NoiseHandshake, HandshakeState, readU32, writeU32, writeBytes } from '../wireguard/tunnel/Handshake';
 import { stringToBytes } from '../wireguard/Constants';
 import { chacha20Poly1305Encrypt, chacha20Poly1305Decrypt } from '../wireguard/crypto/ChaCha20Poly1305';
 import { blake2s256 } from '../wireguard/crypto/Blake2s';
@@ -128,7 +128,7 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
           JSON.stringify(e));
       }
 
-      // routes/trustedApplications 在 API 23 上均不生效——以下是最终可用配置
+      // VpnConfig.routes 在 API 23 不生效——保持 VPN 子网通信
       const config: vpnExtension.VpnConfig = {
         addresses: [{
           address: { address: clientIp, family: 1, port: 0 },
@@ -296,12 +296,9 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
     // 验证私钥 Decode → Derive 是否匹配服务器期望的公钥
     const ourPrivKey = base64Decode(clientPrivKeyB64 || '');
     if (ourPrivKey.length === 32) {
-      const ourPrivHex = bytesToHex(ourPrivKey);
-      hilog.info(DOMAIN, TAG, 'Our privKey hex: %{public}s', ourPrivHex);
       const ourPubKey = x25519(ourPrivKey, 9n);
       const ourPubB64 = base64Encode(ourPubKey);
-      hilog.info(DOMAIN, TAG, 'Our derived pub B64: %{public}s', ourPubB64);
-      // Expected: f/djvIGyvngmpfmYwlwXhVmuT8S828S53G5RqDVkFhE=
+      hilog.info(DOMAIN, TAG, 'Our pub B64: %{public}s', ourPubB64);
       const expectedPubB64 = 'f/djvIGyvngmpfmYwlwXhVmuT8S828S53G5RqDVkFhE=';
       if (ourPubB64 === expectedPubB64) {
         hilog.info(DOMAIN, TAG, '✅ Our pubKey matches wg pubkey!');
@@ -350,7 +347,7 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
     // 通过 loopback 发送到主进程 UdpRelay（主进程 NAPI socket 直连 WG）
     if (this.udpSocket) {
       await this.udpSocket.send({
-        data: initMsg.buffer.slice(0, initMsg.byteLength) as ArrayBuffer,
+        data: initMsg.buffer as ArrayBuffer,
         address: { address: '127.0.0.1', port: this.relayPort },
       });
       hilog.info(DOMAIN, TAG, 'Initiation sent to relay');
@@ -397,6 +394,13 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
     if (!this.handshake || !this.handshake.sessionKeys) return;
     if (data.length < 32) return;
 
+    // 反重放保护: 读取 counter (LE u64) 并检查 replay window
+    const recvCounter: number = readU32(data, 8) + readU32(data, 12) * 0x100000000;
+    const expected: number = this.handshake.sessionKeys.recvCounter;
+    if (recvCounter < expected && expected - recvCounter > 2000) {
+      return; // 重放过期包，丢弃
+    }
+
     const recvKey: Uint8Array = this.handshake.sessionKeys.recvKey;
 
     // Transport nonce: counter(LE 8bytes) + zeros(4bytes) = 12 bytes
@@ -410,7 +414,9 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
     if (plainIP && plainIP.length > 0 && this.tunFd >= 0) {
       try {
         this.writeTunPacket(plainIP);
-        this.handshake.sessionKeys.recvCounter++;
+        if (recvCounter >= expected) {
+          this.handshake.sessionKeys.recvCounter = recvCounter + 1;
+        }
         this.transportRxBytes += plainIP.length;
         if (this.handshake.sessionKeys.recvCounter % 10 === 1) {
           hilog.info(DOMAIN, TAG, '📥 WG→TUN: %{public}d bytes, totalRx=%{public}d',
@@ -437,8 +443,8 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
   private transportEncrypt(key: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array): Uint8Array {
     const result = chacha20Poly1305Encrypt(key, nonce, plaintext, new Uint8Array(0));
     const out: Uint8Array = new Uint8Array(result.ciphertext.length + result.tag.length);
-    for (let i = 0; i < result.ciphertext.length; i++) out[i] = result.ciphertext[i];
-    for (let i = 0; i < result.tag.length; i++) out[result.ciphertext.length + i] = result.tag[i];
+    out.set(result.ciphertext);
+    out.set(result.tag, result.ciphertext.length);
     return out;
   }
 
@@ -524,7 +530,7 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
 
     try {
       await this.udpSocket.send({
-        data: msg.buffer.slice(0, msg.byteLength) as ArrayBuffer,
+        data: msg.buffer as ArrayBuffer,
         address: { address: '127.0.0.1', port: this.relayPort },
       });
     } catch (e) {
@@ -582,7 +588,7 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
       off = writeU64LE(msg, off, BigInt(counter));
       off = writeBytes(msg, off, encrypted);
       await this.udpSocket.send({
-        data: msg.buffer.slice(0, msg.byteLength) as ArrayBuffer,
+        data: msg.buffer as ArrayBuffer,
         address: { address: '127.0.0.1', port: this.relayPort },
       });
     } catch (e) {
@@ -596,7 +602,7 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
     try {
       const initMsg: Uint8Array = this.handshake.buildInitiation();
       this.udpSocket.send({
-        data: initMsg.buffer.slice(0, initMsg.byteLength) as ArrayBuffer,
+        data: initMsg.buffer as ArrayBuffer,
         address: { address: '127.0.0.1', port: this.relayPort },
       });
       hilog.info(DOMAIN, TAG, 'Rekey sent');
@@ -641,7 +647,7 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
   private async writeTunPacket(ipPacket: Uint8Array): Promise<void> {
     if (this.tunFd < 0 || ipPacket.length === 0) return;
     try {
-      const buf: ArrayBuffer = ipPacket.buffer.slice(0, ipPacket.byteLength) as ArrayBuffer;
+      const buf: ArrayBuffer = ipPacket.buffer as ArrayBuffer;
       await fileIo.write(this.tunFd, buf);
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'writeTunPacket error: %{public}s', JSON.stringify(e));
@@ -671,32 +677,11 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
 }
 
 // ── 工具 ──
-function readU32(buf: Uint8Array, off: number): number {
-  return (buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24)) >>> 0;
-}
-
-function writeU32(buf: Uint8Array, off: number, val: number): number {
-  buf[off] = val & 0xFF;
-  buf[off + 1] = (val >>> 8) & 0xFF;
-  buf[off + 2] = (val >>> 16) & 0xFF;
-  buf[off + 3] = (val >>> 24) & 0xFF;
-  return off + 4;
-}
-
 function writeU64LE(buf: Uint8Array, off: number, val: bigint): number {
   for (let i = 0; i < 8; i++) {
     buf[off + i] = Number((val >> BigInt(i * 8)) & 0xFFn);
   }
   return off + 8;
-}
-
-function writeBytes(buf: Uint8Array, off: number, data: Uint8Array): number {
-  for (let i = 0; i < data.length; i++) buf[off + i] = data[i];
-  return off + data.length;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise<void>(resolve => setTimeout(resolve, ms));
 }
 
 function bytesToHex(bytes: Uint8Array): string {

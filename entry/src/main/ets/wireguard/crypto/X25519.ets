@@ -8,6 +8,8 @@
  * 字段为 GF(p)，p = 2^255 - 19
  */
 
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
+
 const P: bigint = (1n << 255n) - 19n;
 const A24: bigint = 121665n; // (486662 - 2) / 4
 
@@ -141,11 +143,18 @@ const BASE_POINT: bigint = 9n;
  * 生成 X25519 密钥对
  * 私钥 = 32 随机字节（clamped），公钥 = x25519(私钥, 9)
  */
-export function generateX25519KeyPair(): X25519KeyPairResult {
-  const priv: Uint8Array = new Uint8Array(32);
-  for (let i = 0; i < 32; i++) {
-    priv[i] = (Math.random() * 256) | 0;
+let g_random: cryptoFramework.Random | null = null;
+
+function getRandom(): cryptoFramework.Random {
+  if (!g_random) {
+    g_random = cryptoFramework.createRandom();
   }
+  return g_random;
+}
+
+export function generateX25519KeyPair(): X25519KeyPairResult {
+  const blob: cryptoFramework.DataBlob = getRandom().generateRandomSync(32);
+  const priv: Uint8Array = blob.data;
 
   const pub: Uint8Array = x25519(priv, BASE_POINT);
 

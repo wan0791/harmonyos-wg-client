@@ -11,6 +11,8 @@
 import { socket, connection } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { NativeSocket } from './NativeSocketFFI';
+import { readU32 } from '../wireguard/tunnel/Handshake';
+import { stringToBytes } from '../wireguard/Constants';
 
 const DOMAIN = 0x0000;
 const TAG = 'UdpRelay';
@@ -27,16 +29,6 @@ export function getRelay(): UdpRelay {
     instance = new UdpRelay();
   }
   return instance;
-}
-
-function readU32(buf: Uint8Array, off: number): number {
-  return (buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24)) >>> 0;
-}
-
-function stringToBytes(s: string): Uint8Array {
-  const buf: Uint8Array = new Uint8Array(s.length);
-  for (let i: number = 0; i < s.length; i++) buf[i] = s.charCodeAt(i) & 0xFF;
-  return buf;
 }
 
 export class UdpRelay {

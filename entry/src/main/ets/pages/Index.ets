@@ -253,22 +253,6 @@ struct Index {
       .width('100%').margin({ top: 8, bottom: 8 })
   }
 
-  @Builder buildInputRow(label: string, placeholder: string, textVal: string) {
-    Column() {
-      Text(label).fontSize(12).fontColor('#a0aec0').width('100%').margin({ bottom: 4 })
-      TextInput({ placeholder: placeholder, text: textVal })
-        .width('100%')
-        .height(40)
-        .fontSize(14)
-        .fontColor('#e2e8f0')
-        .placeholderColor('#4a5568')
-        .backgroundColor('#161b22')
-        .borderRadius(8)
-    }
-    .width('100%')
-    .margin({ bottom: 12 })
-  }
-
   @Builder buildHostPortRow() {
     Column() {
       Text('服务端地址').fontSize(12).fontColor('#a0aec0').width('100%').margin({ bottom: 4 })

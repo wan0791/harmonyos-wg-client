@@ -25,6 +25,9 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 const DOMAIN = 0x0000;
 const TAG = 'WgHs';
 
+// 仅开发调试时打开——生产环境必须关闭，避免握手密钥泄露到 hilog
+const DEBUG_HANDSHAKE: boolean = false;
+
 /** WireGuard 协议构造字符串 */
 const CONSTRUCTION: string = 'Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s';
 const IDENTIFIER: string = 'WireGuard v1 zx2c4 Jason@zx2c4.com';
@@ -196,6 +199,7 @@ export class NoiseHandshake {
       const senderIdx: number = readU32(data, off); off += 4;
       this.remoteIndex = senderIdx;
       const receiverIdx: number = readU32(data, off); off += 4;
+      if (receiverIdx !== this.localIndex) return false; // 不是给我们的
       const remoteEphemeral: Uint8Array = data.subarray(off, off + 32); off += 32;
 
       // wireguard-go ConsumeResponse:
@@ -282,6 +286,7 @@ function bytesToHex(b: Uint8Array): string {
 }
 
 function dh_log(label: string, data: Uint8Array): void {
+  if (!DEBUG_HANDSHAKE) return;
   const max: number = data.length > 64 ? 64 : data.length;
   hilog.info(DOMAIN, TAG, 'DBG %{public}s[%{public}d]=%{public}s',
     label, data.length, bytesToHex(data.subarray(0, max)));
