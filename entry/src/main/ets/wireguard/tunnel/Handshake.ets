@@ -15,7 +15,7 @@
  *   之后双方均可发送 Transport Data
  */
 
-import { blake2s256 } from '../crypto/Blake2s';
+import { blake2s256, blake2s128 } from '../crypto/Blake2s';
 import { kdf1, kdf2, kdf3, hmacBlake2s } from '../crypto/HKDF';
 import { generateX25519KeyPair, X25519KeyPairResult, x25519DH } from '../crypto/X25519';
 import { chacha20Poly1305Encrypt, chacha20Poly1305Decrypt } from '../crypto/ChaCha20Poly1305';
@@ -165,10 +165,10 @@ export class NoiseHandshake {
     off = writeBytes(msg, off, encryptedStatic);
     off = writeBytes(msg, off, encryptedTimestamp);
 
-    // MAC1 (CookieChecker style: key = BLAKE2s("mac1----" || server_pub))
+    // MAC1 CookieChecker: key = BLAKE2s-256("mac1----" || remote_pub), mac1 = BLAKE2s-128(msg, key)
     const mac1Key: Uint8Array = blake2s256(concatBytes(stringToBytes(LABEL_MAC1), this.remoteStaticPublic));
     const mac1Input: Uint8Array = msg.subarray(0, off);
-    const mac1: Uint8Array = blake2s256(mac1Input, mac1Key).subarray(0, 16);
+    const mac1: Uint8Array = blake2s128(mac1Input, mac1Key);
     dh_log('mac1', mac1);
     off = writeBytes(msg, off, mac1);
 

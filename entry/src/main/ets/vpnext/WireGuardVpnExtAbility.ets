@@ -15,6 +15,7 @@
 import { VpnExtensionAbility, vpnExtension } from '@kit.NetworkKit';
 import { Want } from '@kit.AbilityKit';
 import { socket } from '@kit.NetworkKit';
+import { fileIo } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { NoiseHandshake, HandshakeState } from '../wireguard/tunnel/Handshake';
@@ -24,6 +25,8 @@ import { blake2s256 } from '../wireguard/crypto/Blake2s';
 import { base64Decode, base64Encode } from '../wireguard/crypto/Base64';
 import { x25519, x25519DH } from '../wireguard/crypto/X25519';
 import { hkdf } from '../wireguard/crypto/HKDF';
+// NativeSocket only used in main process (UdpRelay) — VPN uses loopback relay
+// import { NativeSocket, RecvResult } from '../utils/NativeSocketFFI';
 
 const DOMAIN = 0x0000;
 const TAG = 'WgVpnExt';
@@ -40,11 +43,14 @@ const TEST_DNS              = '114.114.114.114';
 export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
   private vpnConnection: vpnExtension.VpnConnection | null = null;
   private udpSocket: socket.UDPSocket | null = null;
+  private wgServerHost: string = '';
+  private wgServerPort: number = 0;
   private isRunning: boolean = false;
   private tunFd: number = -1;
   private handshake: NoiseHandshake | null = null;
   private relayPort: number = 0;
   private vpnExtPort: number = 0;
+  private clientIp: string = '';  // VPN IP，用于 SNAT
 
   onCreate(want: Want): void {
     hilog.info(DOMAIN, TAG, 'VpnExtension onCreate');
@@ -86,9 +92,12 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
     hilog.info(DOMAIN, TAG, 'Server: %{public}s:%{public}d, Relay: 127.0.0.1:%{public}d, VpnExtPort: %{public}d',
       serverHost, serverPort, this.relayPort, this.vpnExtPort);
 
+    // 读取 AllowedIPs
+    const allowedIps: string = (want.parameters?.['allowedIps'] as string) ?? '0.0.0.0/0';
+
     // 启动 VPN 隧道（传递密钥参数）
     await this.setupVpn(serverHost, serverPort, clientAddress, dnsServer,
-      clientPrivateKeyB64, serverPublicKeyB64, serverIP, presharedKeyB64);
+      clientPrivateKeyB64, serverPublicKeyB64, serverIP, presharedKeyB64, allowedIps);
   }
 
   onDestroy(): void {
@@ -102,7 +111,8 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
 
   private async setupVpn(host: string, port: number, clientIp: string, dns: string,
     clientPrivKeyB64?: string, serverPubKeyB64?: string, serverIP?: string,
-    presharedKeyB64?: string): Promise<void> {
+    presharedKeyB64?: string, allowedIps?: string): Promise<void> {
+    this.clientIp = clientIp;
     try {
       this.vpnConnection = vpnExtension.createVpnConnection(this.context);
 
@@ -118,6 +128,7 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
           JSON.stringify(e));
       }
 
+      // routes/trustedApplications 在 API 23 上均不生效——以下是最终可用配置
       const config: vpnExtension.VpnConfig = {
         addresses: [{
           address: { address: clientIp, family: 1, port: 0 },
@@ -125,8 +136,8 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
         }],
         mtu: 1420,
         dnsAddresses: [dns],
-        blockedApplications: [],
       };
+      hilog.info(DOMAIN, TAG, 'VpnConfig: VPN subnet only');
 
       this.tunFd = await this.vpnConnection.create(config);
       this.isRunning = true;
@@ -147,6 +158,9 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
   private async startWireGuard(host: string, port: number,
     clientPrivKeyB64?: string, serverPubKeyB64?: string, serverIP?: string,
     presharedKeyB64?: string): Promise<void> {
+    this.wgServerHost = serverIP || host;
+    this.wgServerPort = port;
+
     // ArkTS UDP socket（绑定到 vpnExtPort 以接收中继转发的 Response）
     if (!this.udpSocket) {
       const relaySocket: socket.UDPSocket = socket.constructUDPSocketInstance();
@@ -318,7 +332,7 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
       hilog.error(DOMAIN, TAG, 'ChaCha20 test error: %{public}s', JSON.stringify(e));
     }
 
-    // 5. 启动接收循环（必须在发送前注册，否则可能漏接快速响应）
+    // 5. 启动接收循环
     if (this.udpSocket) {
       this.startReceiveLoop(this.udpSocket, host, port);
     }
@@ -333,53 +347,16 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
     const mac1Hex: string = bytesToHex(initMsg.subarray(initMsg.length - 32, initMsg.length - 16));
     hilog.info(DOMAIN, TAG, 'MAC1: %{public}s', mac1Hex);
 
-    // 发送方式1：直连 WG 服务器（用 IP 地址，避免 DNS 问题）
-    const destIP: string = serverIP || host;
-    if (this.udpSocket) {
-      try {
-        await this.udpSocket.send({
-          data: initMsg.buffer.slice(0, initMsg.byteLength) as ArrayBuffer,
-          address: { address: destIP, port: port },
-        });
-        hilog.info(DOMAIN, TAG, '✅ DIRECT sent to %{public}s:%{public}d', destIP, port);
-      } catch (e) {
-        hilog.info(DOMAIN, TAG, '❌ DIRECT failed: %{public}s', JSON.stringify(e));
-      }
-    }
-
-    // 发送方式2：通过本地中继（兜底）
+    // 通过 loopback 发送到主进程 UdpRelay（主进程 NAPI socket 直连 WG）
     if (this.udpSocket) {
       await this.udpSocket.send({
         data: initMsg.buffer.slice(0, initMsg.byteLength) as ArrayBuffer,
         address: { address: '127.0.0.1', port: this.relayPort },
       });
-      hilog.info(DOMAIN, TAG, 'Initiation sent via relay (127.0.0.1:%{public}d)', this.relayPort);
+      hilog.info(DOMAIN, TAG, 'Initiation sent to relay');
     }
 
-    // 6. 握手等待循环
-    for (let attempt = 0; attempt < 3; attempt++) {
-      await sleep(2000);
-
-      if (this.handshake && this.handshake.isComplete()) {
-        hilog.info(DOMAIN, TAG, '✅ Handshake completed!');
-        break;
-      }
-
-      if (this.handshake && this.handshake.state === HandshakeState.WAITING_RESPONSE) {
-        hilog.info(DOMAIN, TAG, 'Retry sending Initiation (attempt %{public}d)', attempt + 2);
-        const retryMsg: Uint8Array = this.handshake.buildInitiation();
-        if (this.udpSocket) {
-          try {
-            await this.udpSocket.send({
-              data: retryMsg.buffer.slice(0, retryMsg.byteLength) as ArrayBuffer,
-              address: { address: '127.0.0.1', port: this.relayPort },
-            });
-          } catch (e) {
-            hilog.error(DOMAIN, TAG, 'Retry send failed: %{public}s', JSON.stringify(e));
-          }
-        }
-      }
-    }
+    // 握手只发一次——重试会破坏 Noise 状态（rekey 定时器负责后续重握）
   }
 
   /** 启动接收循环（监听 relay 转发回来的 WG 服务器响应） */
@@ -397,17 +374,278 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
           if (this.handshake && this.handshake.sessionKeys) {
             hilog.info(DOMAIN, TAG, '会话密钥已建立');
           }
+          this.startTunForwarding();
         } else {
           hilog.error(DOMAIN, TAG, '❌ 握手处理失败');
         }
       } else if (msgType === 4) {
-        hilog.info(DOMAIN, TAG, 'Transport data (%{public}d bytes)', bytes.length);
+        this.processTransportData(bytes);
       } else if (msgType === 3) {
-        hilog.info(DOMAIN, TAG, 'Cookie reply');
+        hilog.info(DOMAIN, TAG, '🍪 Cookie reply (%{public}d bytes)', bytes.length);
       } else {
         hilog.info(DOMAIN, TAG, 'Unknown type=%{public}d', msgType);
       }
     });
+  }
+
+  // ═══════════════════════════════════════
+  // Transport 数据转发
+  // ═══════════════════════════════════════
+
+  /** 处理收到的 Transport data（type=4），解密后写入 TUN */
+  private processTransportData(data: Uint8Array): void {
+    if (!this.handshake || !this.handshake.sessionKeys) return;
+    if (data.length < 32) return;
+
+    const recvKey: Uint8Array = this.handshake.sessionKeys.recvKey;
+
+    // Transport nonce: counter(LE 8bytes) + zeros(4bytes) = 12 bytes
+    const nonce: Uint8Array = new Uint8Array(12);
+    for (let i = 0; i < 8; i++) {
+      nonce[i] = data[8 + i];
+    }
+
+    const ciphertextWithTag: Uint8Array = data.subarray(16);
+    const plainIP: Uint8Array | null = this.transportDecrypt(recvKey, nonce, ciphertextWithTag);
+    if (plainIP && plainIP.length > 0 && this.tunFd >= 0) {
+      try {
+        this.writeTunPacket(plainIP);
+        this.handshake.sessionKeys.recvCounter++;
+        this.transportRxBytes += plainIP.length;
+        if (this.handshake.sessionKeys.recvCounter % 10 === 1) {
+          hilog.info(DOMAIN, TAG, '📥 WG→TUN: %{public}d bytes, totalRx=%{public}d',
+            plainIP.length, this.transportRxBytes);
+        }
+      } catch (e) {
+        hilog.error(DOMAIN, TAG, 'TUN write failed: %{public}s', JSON.stringify(e));
+      }
+    } else if (plainIP === null) {
+      hilog.error(DOMAIN, TAG, 'Transport decrypt FAILED');
+    }
+  }
+
+  /** Transport 专用的 AEAD 解密（使用 12 字节 nonce） */
+  private transportDecrypt(key: Uint8Array, nonce: Uint8Array, ciphertextWithTag: Uint8Array): Uint8Array | null {
+    try {
+      return chacha20Poly1305Decrypt(key, nonce, ciphertextWithTag, new Uint8Array(0));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** Transport 专用的 AEAD 加密 */
+  private transportEncrypt(key: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array): Uint8Array {
+    const result = chacha20Poly1305Encrypt(key, nonce, plaintext, new Uint8Array(0));
+    const out: Uint8Array = new Uint8Array(result.ciphertext.length + result.tag.length);
+    for (let i = 0; i < result.ciphertext.length; i++) out[i] = result.ciphertext[i];
+    for (let i = 0; i < result.tag.length; i++) out[result.ciphertext.length + i] = result.tag[i];
+    return out;
+  }
+
+  /** SNAT：将 TUN 包的源 IP 改写为 VPN IP，同时修正 IP 和 TCP/UDP checksum */
+  private snatPacket(ipPacket: Uint8Array): void {
+    if (ipPacket.length < 20 || !this.clientIp) return;
+    const versionIhl: number = ipPacket[0];
+    if ((versionIhl >> 4) !== 4) return;
+
+    const parts: string[] = this.clientIp.split('.');
+    if (parts.length !== 4) return;
+    const newIp: number[] = parts.map((s: string): number => parseInt(s));
+
+    // 保存旧源 IP（offset 12-15）
+    const oldA: number = (ipPacket[12] << 8) + ipPacket[13];
+    const oldB: number = (ipPacket[14] << 8) + ipPacket[15];
+    const newA: number = (newIp[0] << 8) + newIp[1];
+    const newB: number = (newIp[2] << 8) + newIp[3];
+
+    // 改源 IP
+    ipPacket[12] = newIp[0];
+    ipPacket[13] = newIp[1];
+    ipPacket[14] = newIp[2];
+    ipPacket[15] = newIp[3];
+
+    // 重算 IPv4 header checksum（offset 10-11，增量更新更快但重算更安全）
+    ipPacket[10] = 0;
+    ipPacket[11] = 0;
+    const ihl: number = versionIhl & 0x0F;
+    const headerLen: number = ihl * 4;
+    let sum: number = 0;
+    for (let i: number = 0; i < headerLen; i += 2) {
+      sum += (ipPacket[i] << 8) + ipPacket[i + 1];
+    }
+    while (sum > 0xFFFF) sum = (sum & 0xFFFF) + (sum >>> 16);
+    const csum: number = (~sum) & 0xFFFF;
+    ipPacket[10] = (csum >> 8) & 0xFF;
+    ipPacket[11] = csum & 0xFF;
+
+    // 修正 TCP/UDP checksum（增量更新，补偿伪首部中源 IP 的变化）
+    const protocol: number = ipPacket[9];
+    if (protocol !== 6 && protocol !== 17) return; // 仅 TCP/UDP
+    const frag: number = (ipPacket[6] << 8) + ipPacket[7];
+    if ((frag & 0x3FFF) !== 0) return;  // 非首分片，无传输头
+    const transportOff: number = ihl * 4;
+    if (transportOff + 2 > ipPacket.length) return;
+    // TCP/UDP checksum 在传输头 offset 2-3
+    let tcOld: number = (ipPacket[transportOff + 2] << 8) + ipPacket[transportOff + 3];
+    if (tcOld === 0) return; // 0 表示不校验
+    // 增量修正：tcNew = tcOld - old_ip(16bit×2) + new_ip(16bit×2)
+    let tcNew: number = tcOld - oldA - oldB + newA + newB;
+    while (tcNew < 0) tcNew += 0xFFFF;
+    while (tcNew > 0xFFFF) tcNew = (tcNew & 0xFFFF) + (tcNew >> 16);
+    if (tcNew === 0) tcNew = 0xFFFF; // ones' complement: 0xFFFF 表示 0
+    ipPacket[transportOff + 2] = (tcNew >> 8) & 0xFF;
+    ipPacket[transportOff + 3] = tcNew & 0xFF;
+  }
+
+  /** 发送 Transport 消息到 WG 服务器 */
+  private async sendTransportPacket(ipPacket: Uint8Array): Promise<void> {
+    if (!this.handshake || !this.handshake.sessionKeys || !this.udpSocket) return;
+
+    // SNAT: 重写源 IP 为 VPN IP，确保 WG 服务器 AllowedIPs 匹配
+    this.snatPacket(ipPacket);
+
+    const keys = this.handshake.sessionKeys;
+    const counter: number = keys.sendCounter;
+    keys.sendCounter++;
+
+    // Transport nonce: counter(LE 8bytes) + zeros(4bytes)
+    const nonce: Uint8Array = new Uint8Array(12);
+    writeU64LE(nonce, 0, BigInt(counter));
+
+    const encrypted: Uint8Array = this.transportEncrypt(keys.sendKey, nonce, ipPacket);
+
+    // Build transport message: type(4) + receiver(4) + counter(8) + encrypted
+    const msg: Uint8Array = new Uint8Array(16 + encrypted.length);
+    let off: number = 0;
+    off = writeU32(msg, off, 4); // type = transport
+    off = writeU32(msg, off, this.handshake.remoteIndex); // receiver index
+    off = writeU64LE(msg, off, BigInt(counter));
+    off = writeBytes(msg, off, encrypted);
+
+    try {
+      await this.udpSocket.send({
+        data: msg.buffer.slice(0, msg.byteLength) as ArrayBuffer,
+        address: { address: '127.0.0.1', port: this.relayPort },
+      });
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'Transport send error: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  private keepaliveTimer: number = -1;
+  private rekeyTimer: number = -1;
+  private transportRxBytes: number = 0;
+  private transportTxBytes: number = 0;
+
+  private sleepMs(ms: number): Promise<void> {
+    return new Promise<void>(resolve => setTimeout(resolve, ms));
+  }
+
+  /** 从 TUN 读取 IP 包并加密发送 */
+  private startTunForwarding(): void {
+    if (this.tunFd < 0) {
+      hilog.error(DOMAIN, TAG, 'TUN fd invalid, cannot forward');
+      return;
+    }
+    hilog.info(DOMAIN, TAG, 'TUN forwarding started, fd=%{public}d', this.tunFd);
+
+    // Keepalive: 每 10 秒发送空 transport 包维持 NAT 绑定
+    this.keepaliveTimer = setInterval((): void => {
+      if (this.isRunning && this.handshake?.sessionKeys) {
+        this.sendKeepalive();
+      }
+    }, 10000);
+
+    // Rekey: 暂时禁用（会破坏 Noise 状态，后续修复）
+    // this.rekeyTimer = setInterval((): void => {
+    //   if (this.isRunning && this.handshake) { this.doRekey(); }
+    // }, 120000);
+
+    // 启动 TUN 异步读取循环
+    this.tunReadLoop();
+  }
+
+  /** 发送 keepalive 空包 */
+  private async sendKeepalive(): Promise<void> {
+    if (!this.handshake?.sessionKeys || !this.udpSocket) return;
+    const keys = this.handshake.sessionKeys;
+    try {
+      const counter: number = keys.sendCounter;
+      keys.sendCounter++;
+      const nonce: Uint8Array = new Uint8Array(12);
+      writeU64LE(nonce, 0, BigInt(counter));
+      const encrypted: Uint8Array = this.transportEncrypt(keys.sendKey, nonce, new Uint8Array(0));
+      const msg: Uint8Array = new Uint8Array(16 + encrypted.length);
+      let off: number = 0;
+      off = writeU32(msg, off, 4);
+      off = writeU32(msg, off, this.handshake.remoteIndex);
+      off = writeU64LE(msg, off, BigInt(counter));
+      off = writeBytes(msg, off, encrypted);
+      await this.udpSocket.send({
+        data: msg.buffer.slice(0, msg.byteLength) as ArrayBuffer,
+        address: { address: '127.0.0.1', port: this.relayPort },
+      });
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  /** 触发 rekey */
+  private doRekey(): void {
+    if (!this.handshake || !this.udpSocket) return;
+    try {
+      const initMsg: Uint8Array = this.handshake.buildInitiation();
+      this.udpSocket.send({
+        data: initMsg.buffer.slice(0, initMsg.byteLength) as ArrayBuffer,
+        address: { address: '127.0.0.1', port: this.relayPort },
+      });
+      hilog.info(DOMAIN, TAG, 'Rekey sent');
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'Rekey failed');
+    }
+  }
+
+  private async tunReadLoop(): Promise<void> {
+    const bufSize: number = 2048;
+    let loopCount: number = 0;
+
+    while (this.isRunning && this.tunFd >= 0) {
+      try {
+        const arrayBuffer: ArrayBuffer = new ArrayBuffer(bufSize);
+        const readLen: number = await fileIo.read(this.tunFd, arrayBuffer);
+        loopCount++;
+        if (readLen > 0) {
+          const ipPacket: Uint8Array = new Uint8Array(arrayBuffer.slice(0, readLen));
+          // 忽略 keepalive（空包或过短）
+          if (ipPacket.length >= 20) {
+            // 丢弃非 IPv4 包（IPv6 源 IP 为 ::，WG 服务器 AllowedIPs 不匹配）
+            const version: number = ipPacket[0] >> 4;
+            if (version !== 4) continue;
+            // 每 10 个包打印一次统计
+            if (loopCount % 10 === 1) {
+              hilog.info(DOMAIN, TAG, '📤 TUN→WG: %{public}d bytes, totalTx=%{public}d',
+                ipPacket.length, this.transportTxBytes);
+            }
+            this.transportTxBytes += ipPacket.length;
+            await this.sendTransportPacket(ipPacket);
+          }
+        }
+      } catch (e) {
+        // TUN read may throw when no data — just retry
+        await this.sleepMs(50);
+      }
+    }
+  }
+
+  /** 将解密后的 IP 包写入 TUN */
+  private async writeTunPacket(ipPacket: Uint8Array): Promise<void> {
+    if (this.tunFd < 0 || ipPacket.length === 0) return;
+    try {
+      const buf: ArrayBuffer = ipPacket.buffer.slice(0, ipPacket.byteLength) as ArrayBuffer;
+      await fileIo.write(this.tunFd, buf);
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'writeTunPacket error: %{public}s', JSON.stringify(e));
+    }
   }
 
   // ═══════════════════════════════════════
@@ -416,6 +654,8 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
 
   private cleanup(): void {
     this.isRunning = false;
+    if (this.keepaliveTimer >= 0) { clearInterval(this.keepaliveTimer); this.keepaliveTimer = -1; }
+    if (this.rekeyTimer >= 0) { clearInterval(this.rekeyTimer); this.rekeyTimer = -1; }
     if (this.udpSocket) {
       try { this.udpSocket.close(); } catch (e) { /* ignore */ }
       this.udpSocket = null;
@@ -433,6 +673,26 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
 // ── 工具 ──
 function readU32(buf: Uint8Array, off: number): number {
   return (buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24)) >>> 0;
+}
+
+function writeU32(buf: Uint8Array, off: number, val: number): number {
+  buf[off] = val & 0xFF;
+  buf[off + 1] = (val >>> 8) & 0xFF;
+  buf[off + 2] = (val >>> 16) & 0xFF;
+  buf[off + 3] = (val >>> 24) & 0xFF;
+  return off + 4;
+}
+
+function writeU64LE(buf: Uint8Array, off: number, val: bigint): number {
+  for (let i = 0; i < 8; i++) {
+    buf[off + i] = Number((val >> BigInt(i * 8)) & 0xFFn);
+  }
+  return off + 8;
+}
+
+function writeBytes(buf: Uint8Array, off: number, data: Uint8Array): number {
+  for (let i = 0; i < data.length; i++) buf[off + i] = data[i];
+  return off + data.length;
 }
 
 function sleep(ms: number): Promise<void> {

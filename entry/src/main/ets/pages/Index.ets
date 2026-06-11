@@ -14,6 +14,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { parseWgConfig } from '../utils/WgConfigParser';
 import { decodeQrCode, PixelData } from '../utils/QrDecoder';
 import { getRelay } from '../utils/UdpRelay';
+import { NativeSocket } from '../utils/NativeSocketFFI';
 
 const DOMAIN = 0x0000;
 const TAG = 'WgImport';
@@ -49,6 +50,12 @@ struct Index {
   @State statusText: string = '就绪';
   @State statusLog: string = '';
   @State isDarkMode: boolean = true;
+  @State diagText: string = '';  // 实时诊断
+  @State tunRxBytes: number = 0;
+  @State tunTxBytes: number = 0;
+
+  private nativeSock: NativeSocket | null = null;
+  private diagTimer: number = -1;
 
   aboutToAppear(): void {
     // 检查是否有扫码返回的结果
@@ -169,6 +176,26 @@ struct Index {
                 this.connectVpn();
               }
             })
+
+          // ── 连接诊断 ──
+          this.buildSectionTitle('连接诊断')
+          Row() {
+            Button('🩺 诊断')
+              .height(32).fontSize(12).fontColor('#e2e8f0')
+              .backgroundColor('#2d3748').borderRadius(6)
+              .layoutWeight(1).margin({ right: 4 })
+              .onClick(() => { this.runDiagnostic(); })
+            Button('📡 测试连通')
+              .height(32).fontSize(12).fontColor('#e2e8f0')
+              .backgroundColor('#2d3748').borderRadius(6)
+              .layoutWeight(1).margin({ left: 4 })
+              .onClick(() => { this.testConnectivity(); })
+          }.width('100%').margin({ bottom: 8 })
+          Text(this.diagText || '点击诊断...')
+            .fontSize(11).fontColor('#a0aec0')
+            .width('100%').padding(8)
+            .backgroundColor('#0f1f3a').borderRadius(6)
+            .margin({ bottom: 12 })
 
           // ── 操作日志 ──
           this.buildSectionTitle('运行日志')
@@ -304,10 +331,27 @@ struct Index {
         }
       }
 
-      // 1. 启动 UDP 中继（运行在 EntryAbility 进程，绕过 TUN 劫持）
+      // 1. 创建 NAPI 原生 socket（主进程不受 TUN 影响，直连 WG 服务器）
+      try {
+        if (!this.nativeSock) {
+          this.nativeSock = new NativeSocket();
+          const fd: number = this.nativeSock.create();
+          this.appendLog('NAPI socket fd=' + fd);
+          hilog.info(DOMAIN, TAG, 'NAPI native socket created, fd=%{public}d', fd);
+        }
+      } catch (e) {
+        this.appendLog('NAPI socket failed: ' + JSON.stringify(e));
+      }
+
+      // 2. 启动 UDP 中继（运行在 EntryAbility 进程，绕过 TUN 劫持）
       this.appendLog('正在启动 UDP 中继...');
       this.appendLog('中继目标: ' + serverIP + ':' + port + ' (域名: ' + this.serverHost + ')');
       const relay = getRelay();
+      if (this.nativeSock) {
+        relay.setNativeSocket(this.nativeSock);
+        relay.startNativeRecvLoop();
+        this.appendLog('NAPI socket hooked into relay');
+      }
       await relay.start(serverIP, port, RELAY_PORT_BASE, VPN_EXT_PORT);
       const relayPort: number = relay.getPort();
       this.appendLog('UDP 中继已启动 relay=' + relayPort + ' vpnExt=' + VPN_EXT_PORT);
@@ -343,6 +387,8 @@ struct Index {
       this.isConnected = true;
       this.statusText = '已连接';
       this.appendLog('VPN 扩展启动成功');
+      // 启动诊断定时器
+      this.startDiagTimer();
     } catch (e) {
       // 中继或 VPN 启动失败 → 停止中继
       this.statusText = '连接失败';
@@ -577,12 +623,56 @@ struct Index {
       this.isConnected = false;
       this.statusText = '已断开';
       this.appendLog('VPN 已停止');
+      this.stopDiagTimer();
 
       // 停止 UDP 中继
       try { getRelay().stop(); } catch (_) { /* ignore */ }
       this.appendLog('UDP 中继已停止');
     } catch (e) {
       this.appendLog('停止失败：' + JSON.stringify(e));
+    }
+  }
+
+  // ── 诊断 ──
+  private startDiagTimer(): void {
+    this.diagTimer = setInterval((): void => {
+      this.runDiagnostic();
+    }, 3000);
+  }
+
+  private stopDiagTimer(): void {
+    if (this.diagTimer >= 0) { clearInterval(this.diagTimer); this.diagTimer = -1; }
+  }
+
+  private runDiagnostic(): void {
+    const relay = getRelay();
+    const lines: string[] = [];
+    lines.push('VPN: ' + (this.isConnected ? '✅' : '❌'));
+    lines.push('NAPI fd=' + (this.nativeSock ? this.nativeSock.getFd() : '?'));
+    lines.push('Relay Tx=' + relay.txBytes + 'B Rx=' + relay.rxBytes + 'B');
+    this.diagText = lines.join(' | ');
+  }
+
+  private async testConnectivity(): Promise<void> {
+    if (!this.isConnected) {
+      this.appendLog('❌ 请先连接 VPN');
+      return;
+    }
+    this.appendLog('🔍 测试连通性...');
+    try {
+      // 通过 relay 的 NAPI socket 发送一个测试数据到 WG 服务器
+      const relay = getRelay();
+      const testBuf: ArrayBuffer = new ArrayBuffer(4);
+      const testView: Uint8Array = new Uint8Array(testBuf);
+      testView[0] = 1; testView[1] = 0; testView[2] = 0; testView[3] = 0; // type=1 (initiation-like test)
+      if (this.nativeSock) {
+        const sent: number = this.nativeSock.sendTo(testBuf, this.serverHost, parseInt(this.serverPort));
+        this.appendLog('📤 测试包已发送: ' + sent + 'B → ' + this.serverHost + ':' + this.serverPort);
+      } else {
+        this.appendLog('❌ NAPI socket 未就绪');
+      }
+    } catch (e) {
+      this.appendLog('❌ 测试失败: ' + JSON.stringify(e));
     }
   }
 }

@@ -10,6 +10,7 @@
 
 import { socket, connection } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { NativeSocket } from './NativeSocketFFI';
 
 const DOMAIN = 0x0000;
 const TAG = 'UdpRelay';
@@ -40,12 +41,20 @@ function stringToBytes(s: string): Uint8Array {
 
 export class UdpRelay {
   private sock: socket.UDPSocket | null = null;
-  private tcpSock: socket.TCPSocket | null = null;
+  private nativeSock: NativeSocket | null = null;  // NAPI 原生 socket（主进程不受 TUN 影响）
   private remoteHost: string = '';
   private remotePort: number = 0;
   private relayPort: number = 0;
   private vpnExtPort: number = 0;
   private running: boolean = false;
+  // 统计
+  txBytes: number = 0;
+  rxBytes: number = 0;
+
+  /** 设置 NAPI 原生 socket（主进程不受 TUN 影响） */
+  setNativeSocket(ns: NativeSocket): void {
+    this.nativeSock = ns;
+  }
 
   /** 启动中继 */
   async start(remoteHost: string, remotePort: number,
@@ -90,9 +99,6 @@ export class UdpRelay {
       hilog.info(DOMAIN, TAG, '中继已启动 relay=%{public}d vpnExt=%{public}d',
         this.relayPort, this.vpnExtPort);
 
-      // TCP 隧道：连接到服务器 socat（TCP 51820 → WG UDP 51820）
-      this.connectTcpTunnel();
-
       this.sock.on('message', (info: socket.SocketMessageInfo): void => {
         this.onMessage(info);
       });
@@ -110,9 +116,8 @@ export class UdpRelay {
 
   async stop(): Promise<void> {
     this.running = false;
-    if (this.tcpSock) {
-      try { this.tcpSock.off('message'); await this.tcpSock.close(); } catch (e) { }
-      this.tcpSock = null;
+    if (this.nativeSock) {
+      this.nativeSock.stopRecvThread();
     }
     if (this.sock) {
       try { this.sock.off('message'); await this.sock.close(); } catch (e) { }
@@ -156,31 +161,14 @@ export class UdpRelay {
     }
   }
 
-  private async forwardToServer(data: Uint8Array): Promise<void> {
-    // 方式1：通过 TCP 隧道（优先，能绕过 TUN）
-    if (this.tcpSock) {
-      try {
-        await this.tcpSock.send({
-          data: data.buffer.slice(0, data.byteLength) as ArrayBuffer,
-        });
-        hilog.info(DOMAIN, TAG, '✅ TCP 隧道转发 %{public}d 字节到服务器', data.byteLength);
-        return;
-      } catch (tcpErr) {
-        hilog.info(DOMAIN, TAG, '⚠️ TCP 转发失败，回退 UDP: %{public}s', JSON.stringify(tcpErr));
-      }
-    }
-    // 方式2：UDP（兜底，可能被 TUN 拦截）
+  private forwardToServer(data: Uint8Array): void {
+    // 纯 NAPI 直连——不依赖任何服务端 relay
+    if (!this.nativeSock) return;
     try {
       const buf: ArrayBuffer = data.buffer.slice(0, data.byteLength) as ArrayBuffer;
-      await this.sock!.send({
-        data: buf,
-        address: { address: this.remoteHost, port: this.remotePort },
-      });
-      hilog.info(DOMAIN, TAG, '✅ UDP 转发到服务器 %{public}s:%{public}d (%{public}d 字节)',
-        this.remoteHost, this.remotePort, data.byteLength);
-    } catch (err) {
-      hilog.error(DOMAIN, TAG, '→服务器失败: %{public}s', JSON.stringify(err));
-    }
+      this.nativeSock.sendTo(buf, this.remoteHost, this.remotePort);
+      this.txBytes += data.byteLength;
+    } catch (e) { /* ignore */ }
   }
 
   private async forwardToVpnExt(data: Uint8Array): Promise<void> {
@@ -197,28 +185,27 @@ export class UdpRelay {
     }
   }
 
-  /** 建立 TCP 隧道（TCPSocket → socat → WG UDP） */
-  private async connectTcpTunnel(): Promise<void> {
-    try {
-      // TCP relay 端口（8443 避免移动网络封锁，服务端 relay.py 在 8443 监听）
-      const tcpRelayPort: number = 8443;
-      const tcpSock: socket.TCPSocket = socket.constructTCPSocketInstance();
-      await tcpSock.connect({
-        address: { address: this.remoteHost, port: tcpRelayPort },
-        timeout: 10000,
-      });
-      this.tcpSock = tcpSock;
-      hilog.info(DOMAIN, TAG, '✅ TCP 隧道已建立 %{public}s:51820', this.remoteHost);
-
-      // 注册 TCP 接收回调（来自 WG 服务器的响应）
-      tcpSock.on('message', (info: socket.SocketMessageInfo): void => {
-        const resp: Uint8Array = new Uint8Array(info.message);
-        hilog.info(DOMAIN, TAG, '📩 TCP 收到 %{public}d 字节服务器响应', resp.byteLength);
-        // 转发回 VpnExtAbility
-        this.forwardToVpnExt(resp);
-      });
-    } catch (tcpErr) {
-      hilog.info(DOMAIN, TAG, '⚠️ TCP 隧道建立失败: %{public}s', JSON.stringify(tcpErr));
-    }
+  /** 启动 C 层 pthread 收包线程（不依赖 JS 定时器） */
+  startNativeRecvLoop(): void {
+    if (!this.nativeSock) return;
+    hilog.info(DOMAIN, TAG, 'Starting C recv thread...');
+    const ok: boolean = this.nativeSock.startRecvThread(
+      (data: ArrayBuffer, ip: string, port: number): void => {
+        if (!this.running) return;
+        const bytes: Uint8Array = new Uint8Array(data);
+        if (bytes.length >= 4) {
+          const msgType: number = readU32(bytes, 0);
+          hilog.info(DOMAIN, TAG, '📩 Native recv: type=%{public}d len=%{public}d from %{public}s:%{public}d',
+            msgType, bytes.length, ip, port);
+          this.rxBytes += bytes.length;
+          if (msgType === MSG_TYPE_RESPONSE || msgType === MSG_TYPE_COOKIE_REPLY ||
+              msgType === MSG_TYPE_TRANSPORT) {
+            this.forwardToVpnExt(bytes);
+          }
+        }
+      }
+    );
+    hilog.info(DOMAIN, TAG, 'C recv thread started: %{public}s', ok ? 'true' : 'false');
   }
+
 }

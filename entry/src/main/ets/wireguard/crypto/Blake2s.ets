@@ -197,3 +197,15 @@ export function blake2s256(data: Uint8Array, key?: Uint8Array): Uint8Array {
   ctx.update(data);
   return ctx.digest();
 }
+
+/**
+ * BLAKE2s-128 哈希（WireGuard MAC1/Cookie）
+ * @param data 输入数据
+ * @param key 密钥（密钥模式）
+ * @returns 16 字节哈希值
+ */
+export function blake2s128(data: Uint8Array, key?: Uint8Array): Uint8Array {
+  const ctx: B2sCtx = new B2sCtx(16, key);
+  ctx.update(data);
+  return ctx.digest();
+}
