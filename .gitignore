@@ -21,9 +21,6 @@ Thumbs.db
 *.swp
 *.swo
 
-# Docs (local only)
-docs/
-
 # Temp
 *.log
 /tmp/
