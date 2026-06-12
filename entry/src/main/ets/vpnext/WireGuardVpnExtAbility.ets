@@ -128,7 +128,7 @@ export default class WireGuardVpnExtAbility extends VpnExtensionAbility {
           JSON.stringify(e));
       }
 
-      // VpnConfig.routes 在 API 23 不生效——保持 VPN 子网通信
+      // VpnConfig.routes 在 API 23 不生效（/proc/net/route + netstat -r 双重验证）
       const config: vpnExtension.VpnConfig = {
         addresses: [{
           address: { address: clientIp, family: 1, port: 0 },
